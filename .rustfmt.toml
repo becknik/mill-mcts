@@ -1,0 +1,11 @@
+max_width = 120
+use_try_shorthand = true
+use_small_heuristics = "Max"
+struct_lit_width = 60
+struct_variant_width = 60
+
+#blank_lines_upper_bound = 1
+#overflow_delimited_expr = false
+#imports_granularity = "Crate"
+#wrap_comments = true
+#format_code_in_doc_comments = true

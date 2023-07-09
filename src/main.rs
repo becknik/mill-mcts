@@ -1,11 +1,12 @@
-use nanorand::{WyRand, Rng};
+use nanorand::{Rng, WyRand};
 use once_cell::sync::Lazy;
 
-use crate::ds::{Action, apply_action, Configuration, Move, Phase, Pos, POSITIONS, State};
+use crate::ds::{apply_action, Action, Configuration, Move, Phase, Pos, State, POSITIONS};
 
-static mut RNG: Lazy<WyRand> = Lazy::new(|| WyRand::new());
+static mut RNG_TEST: Lazy<WyRand> = Lazy::new(|| WyRand::new());
 
 mod ds;
+mod mcts;
 
 fn is_corner(p: Pos) -> bool {
     let (_, i) = p;
@@ -33,7 +34,9 @@ pub fn count(conf: &Configuration, color: State) -> usize {
 }
 
 fn for_each_neighbour<F>(p: Pos, mut func: F)
-    where F: FnMut(Pos) {
+where
+    F: FnMut(Pos),
+{
     let (r, i) = p;
     func((r, (i + 1) % 8));
     func((r, (i + 8 - 1) % 8));
@@ -48,7 +51,9 @@ fn for_each_neighbour<F>(p: Pos, mut func: F)
 }
 
 fn for_each_reachable<F>(conf: &Configuration, p: Pos, mut func: F)
-    where F: FnMut(Pos) {
+where
+    F: FnMut(Pos),
+{
     let can_jump = count(conf, conf.get(p)) == 3;
     if can_jump {
         POSITIONS.iter().copied().filter(|&p| conf.get(p) == State::Empty).for_each(func);
@@ -62,7 +67,9 @@ fn for_each_reachable<F>(conf: &Configuration, p: Pos, mut func: F)
 }
 
 fn for_each_action<F>(conf: &Configuration, phase: Phase, color: State, mut func: F)
-    where F: FnMut(Action) {
+where
+    F: FnMut(Action),
+{
     match phase {
         Phase::Placement => {
             POSITIONS.iter().copied().filter(|&p| conf.get(p) == State::Empty).for_each(|p| {
@@ -86,9 +93,14 @@ pub fn compute_actions(conf: &Configuration, phase: Phase, color: State) -> Vec<
 }
 
 fn for_each_can_take<F>(conf: &Configuration, color: State, func: F)
-    where F: FnMut(Pos) {
+where
+    F: FnMut(Pos),
+{
     let black_has_pieces_not_in_muhle = has_pieces_not_in_muhle(conf, color);
-    POSITIONS.iter().copied().filter(|&p| conf.get(p) == color)
+    POSITIONS
+        .iter()
+        .copied()
+        .filter(|&p| conf.get(p) == color)
         .filter(|&p| !black_has_pieces_not_in_muhle || !is_muhle(conf, p))
         .for_each(func);
 }
@@ -100,25 +112,24 @@ pub fn compute_can_take(conf: &Configuration, color: State) -> Vec<Pos> {
 }
 
 fn for_each_move<F>(conf: &Configuration, phase: Phase, color: State, mut func: F)
-    where F: FnMut(Move) {
+where
+    F: FnMut(Move),
+{
     for_each_action(conf, phase, color, |a| {
         let successor = apply_action(conf, a, color);
-        let can_take = is_muhle(&successor, match a {
-            Action::Place(p) => { p }
-            Action::Move(_from, to) => { to }
-        });
+        let can_take = is_muhle(
+            &successor,
+            match a {
+                Action::Place(p) => p,
+                Action::Move(_from, to) => to,
+            },
+        );
         if can_take {
             for_each_can_take(conf, color.flip_color(), |take| {
-                func(Move {
-                    action: a,
-                    take: Some(take),
-                });
+                func(Move { action: a, take: Some(take) });
             });
         } else {
-            func(Move {
-                action: a,
-                take: None,
-            });
+            func(Move { action: a, take: None });
         }
     });
 }
@@ -128,7 +139,6 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
     for_each_move(conf, phase, color, |m| res.push(m));
     res
 }
-
 
 fn main() {
     loop {
@@ -141,21 +151,19 @@ fn main() {
         let phase = match input.next().unwrap() {
             "P" => Phase::Placement,
             "M" => Phase::Moving,
-            _ => panic!("Unknown phase")
+            _ => panic!("Unknown phase"),
         };
 
         let color = match input.next().unwrap() {
             "B" => State::Black,
             "W" => State::White,
-            _ => panic!("Unknown color")
+            _ => panic!("Unknown color"),
         };
 
         let conf: Configuration = input.next().unwrap().parse().unwrap();
 
         let moves = compute_moves(&conf, phase, color);
-        let i = unsafe {
-           RNG.generate_range(0..moves.len())
-        };
+        let i = unsafe { RNG_TEST.generate_range(0..moves.len()) };
         let selected = moves[i];
         println!("{}", selected.to_string());
     }
