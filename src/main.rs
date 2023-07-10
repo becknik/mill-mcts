@@ -1,7 +1,10 @@
 use nanorand::{Rng, WyRand};
 use once_cell::sync::Lazy;
 
-use crate::ds::{apply_action, Action, Configuration, Move, Phase, Pos, State, POSITIONS};
+use crate::{
+    ds::{apply_action, Action, Configuration, Move, Phase, Pos, State, POSITIONS},
+    mcts::mcts,
+};
 
 static mut RNG_TEST: Lazy<WyRand> = Lazy::new(|| WyRand::new());
 
@@ -141,6 +144,8 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
 }
 
 fn main() {
+    let mut total_moves_made = 0;
+
     loop {
         let mut input = String::new();
 
@@ -163,8 +168,12 @@ fn main() {
         let conf: Configuration = input.next().unwrap().parse().unwrap();
 
         let moves = compute_moves(&conf, phase, color);
+        let selectedd_move = mcts(&conf, total_moves_made, color);
+
         let i = unsafe { RNG_TEST.generate_range(0..moves.len()) };
         let selected = moves[i];
         println!("{}", selected.to_string());
+
+        total_moves_made += 2;
     }
 }
