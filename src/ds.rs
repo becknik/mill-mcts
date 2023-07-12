@@ -112,7 +112,7 @@ impl State {
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Default, Debug)]
 pub struct Configuration {
-    arr: [[State; SIDESXTWO]; 3],
+    pub(crate) arr: [[State; SIDESXTWO]; 3],
 }
 
 impl Configuration {

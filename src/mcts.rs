@@ -14,7 +14,7 @@ pub static mut RNG: Lazy<WyRand> = Lazy::new(|| WyRand::new());
 
 const TREE_INIT_NODE_COUNT: usize = 2_000_000;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum Nash {
     WON,
     DRAW,
@@ -83,7 +83,9 @@ impl MCTSNodeContent {
     fn calculate_uct(&self, parrent_node_visit_ount: f64) -> f64 {
         return if self.win_count == u32::MAX {
             f64::INFINITY
-        } else if self.win_count == 0 {
+        }
+        // To avoid 0/1
+        else if self.win_count == 0 {
             0f64
         } else {
             (self.win_count as f64 / self.visit_count as f64)
@@ -109,10 +111,12 @@ pub fn mcts(conf: &Configuration, move_count: u32, current_turn: State) -> Move 
         for _i in 0..10_000 {
             // Should be most left, non-visited leaf node on the path with the highest UCT value
             let unexplored_leaf_node = selection(&tree);
+            assert!(unexplored_leaf_node.1.visit_count == 0);
 
             // The unexplored leaf's child is now subjected by the following methods
             let child_node_id = expansion(&mut tree, unexplored_leaf_node.0, unexplored_leaf_node.1);
             let child_node = tree.get(&child_node_id).unwrap().data();
+            assert!(child_node.visit_count == 0);
 
             let child_nodes_nash =
                 simulation(*conf, child_node.current_turn, child_node.move_count, &mut simulation_buffer);
@@ -121,9 +125,9 @@ pub fn mcts(conf: &Configuration, move_count: u32, current_turn: State) -> Move 
         }
     }
 
-    let moves = compute_moves(conf, Phase::from(move_count), current_turn);
+    //let moves = compute_moves(conf, Phase::from(move_count), current_turn);
 
-    let root_visit_count = tree.get(tree.root_node_id().unwrap()).unwrap().data().move_count;
+    let root_visit_count = tree.get(tree.root_node_id().unwrap()).unwrap().data().move_count as f64;
 
     // For mapping the configurations on the first tree niveau back to the Move struct needed by the main function
     let selected = tree
@@ -132,11 +136,30 @@ pub fn mcts(conf: &Configuration, move_count: u32, current_turn: State) -> Move 
         .children()
         .iter()
         .map(|node_id| tree.get(node_id).unwrap().data())
-        .map(|mcts_content| mcts_content.calculate_uct(root_visit_count as f64))
-        .enumerate()
-        .max_by(|(_i1, uct1), (_i2, uct2)| uct1.partial_cmp(uct2).unwrap());
+        .max_by(|node1, node2| {
+            let uct1 = node1.calculate_uct(root_visit_count);
+            let uct2 = node2.calculate_uct(root_visit_count);
+            uct1.partial_cmp(&uct2).unwrap()
+        })
+        .unwrap();
+    /*         .map(|node_id| tree.get(node_id).unwrap().data())
+    .map(|mcts_content| mcts_content.calculate_uct(root_visit_count as f64))
+    .enumerate()
+    .max_by(|(_i1, uct1), (_i2, uct2)| uct1.partial_cmp(uct2).unwrap()); */
 
-    moves[selected.unwrap().0]
+    eprintln!(
+        "Selected playfield with UCT: {}\nroot visit count: {}\nmcts node values: \n\tw_i: {}\n\tv_i: {}",
+        selected.calculate_uct(root_visit_count),
+        root_visit_count,
+        selected.win_count,
+        selected.visit_count
+    );
+
+    // TODO map the config from selected back to move? Maybe better solution I cant think of atm.
+    // TODO Commented out lead to out of bounds, strangely. Is the order of the nodes inserted into the id-tree random or are there maybe more nodes added to the id tree than the ones from `calculate_moves`???
+
+    //moves[selected.unwrap().0]
+    convert_config_to_move(*conf, current_turn, selected.conf)
 }
 
 fn apply_move(conf: &Configuration, m: &Move, current_turns_color: State) -> Configuration {
@@ -153,14 +176,20 @@ fn selection(tree: &Tree<MCTSNodeContent>) -> (NodeId, MCTSNodeContent) {
     let mut current_node: &MCTSNodeContent = tree.get(current_node_id).unwrap().data();
 
     // Search the tree along the path with maximal UCT value until node is reached, which wasn't visited so far
-    while current_node.visit_count != 0 {
+    while !(0..=1).contains(&current_node.visit_count) {
         // Later needed for the calculation of the UCT value of the current nodes children
         let current_nodes_visit_count = current_node.visit_count as f64;
 
         let currents_child_ids = tree.children_ids(current_node_id).unwrap();
+        if currents_child_ids.count() == 0 {
+            eprintln!("Visit count: {}, Win count: {}", current_node.visit_count, current_node.win_count);
+            eprintln!("{:?}", current_node.conf);
+        }
+
+        let currents_child_ids = tree.children_ids(current_node_id).unwrap();
 
         // Selects a node with the highest UTC-value from the current nodes child nodes
-        // Wen don't want terminal configs because we cant use expand on them & they should generally filtered because of UTC...
+        // Wen don't want terminal configs because we cant use expand on them & they should generally be filtered because of UTC...
         (current_node_id, current_node) = currents_child_ids
             .map(|node_id| (node_id, tree.get(node_id).unwrap().data()))
             //.filter(|(_, node)| !is_config_won_or_lost(&node.conf, Phase::from(node.move_count)))
@@ -201,40 +230,54 @@ fn expansion(tree: &mut Tree<MCTSNodeContent>, node_id: NodeId, node: MCTSNodeCo
     child_node_ids[i].clone()
 }
 
-/// Simulates a play-through from the leaf state parameters until one side has won the game & returns the nash value relative
-/// to the leaf node the computation started with.
+/// Simulates a play-through from the expansion nodes state parameters until one side has won the game &
+/// returns the nash value relative to the leaf node the computation started with.
 ///
 /// Uses the simulation_buffer to save some allocations.
 fn simulation(
-    leaf_conf: Configuration,
-    leaf_color: State,
-    leaf_move_count: u32,
+    expanded_nodes_conf: Configuration,
+    expanded_nodes_turn: State,
+    expanded_nodes_move_count: u32,
     simulation_buffer: &mut Vec<Move>,
 ) -> Nash {
-    let mut current_conf = leaf_conf;
-    let mut current_color = leaf_color;
-    let mut current_move_count = leaf_move_count;
+    let mut current_conf = expanded_nodes_conf;
+    let mut current_color = expanded_nodes_turn;
+    let mut current_move_count = expanded_nodes_move_count;
 
-    let mut nash = Nash::DRAW;
+    let mut current_nash = Nash::DRAW;
     // Extreme case: The unvisited nodes leaf node already is won or lost.
-    update_nash_relative_to_leaf(&mut nash, &leaf_conf, leaf_color.flip_color(), leaf_color, Phase::from(leaf_move_count));
+    update_nash_relative_to_leaf(
+        &mut current_nash,
+        &expanded_nodes_conf,
+        expanded_nodes_turn.flip_color(),
+        expanded_nodes_turn,
+        Phase::from(expanded_nodes_move_count),
+    );
 
+    // let mut a = 0;
     // TODO break the function when the path is too long and there is a high possibility it is a draw
-    while nash == Nash::DRAW {
-        apply_rand_move(
-            &mut current_conf,
-            if current_move_count < 18 { Phase::Placement } else { Phase::Moving },
-            current_color,
-            simulation_buffer,
-        );
+    while current_nash == Nash::DRAW {
+        /*         eprintln!("{a}");
+        a += 1; */
+
+        apply_rand_move(&mut current_conf, Phase::from(expanded_nodes_move_count), current_color, simulation_buffer);
         simulation_buffer.clear();
 
         current_move_count += 1;
         current_color = current_color.flip_color();
 
-        update_nash_relative_to_leaf(&mut nash, &current_conf, current_color, leaf_color, Phase::from(leaf_move_count));
+        update_nash_relative_to_leaf(
+            &mut current_nash,
+            &current_conf,
+            current_color,
+            expanded_nodes_turn,
+            Phase::from(current_move_count),
+        );
     }
-    nash
+
+    eprintln!("Stopping random path simulation with '{current_nash:?}' for leaf node!");
+
+    current_nash
 }
 
 /// Computes possible moves from config, chooses one randomly, updates config with new one
@@ -265,13 +308,19 @@ fn update_nash_relative_to_leaf(
         return;
     }
 
-    if count(conf, current_color) == 2 || compute_moves(conf, Phase::Moving, current_color).is_empty() {
+    if count(conf, current_color) == 2 || !are_moves_possible(conf, Phase::Moving, current_color) {
         if current_color == leaf_color {
             *nash = Nash::LOST;
         } else {
             *nash = Nash::WON;
         }
     }
+}
+
+fn are_moves_possible(conf: &Configuration, phase: Phase, current_color: State) -> bool {
+    let mut moves_possible = false;
+    for_each_move(conf, phase, current_color, |_| moves_possible = true);
+    moves_possible
 }
 
 // TODO replace this with the nash calculation in the selection method
@@ -328,15 +377,39 @@ fn back_propagation(tree: &mut Tree<MCTSNodeContent>, start_node_id: &NodeId, na
             }
         }
 
-        (current_node_id, current_node) = if let Ok(ancenstor_ids) = tree.ancestor_ids(&current_node_id) {
+        (current_node_id, current_node) = if let Ok(mut ancenstor_ids) = tree.ancestor_ids(&current_node_id) {
             // Any node should have exactly one parent
-            let parent_id = ancenstor_ids.last().unwrap();
-
-            (parent_id.clone(), tree.get_mut(&parent_id.clone()).unwrap().data_mut())
+            if let Some(parent_id) = ancenstor_ids.next() {
+                (parent_id.clone(), tree.get_mut(&parent_id.clone()).unwrap().data_mut())
+            } else {
+                break;
+            }
         } else {
+            eprintln!("I really seems to happen...");
             break;
         };
 
         current_nash = !current_nash;
     }
+}
+
+fn convert_config_to_move(config_start: Configuration, turn_color: State, config_relative: Configuration) -> Move {
+    let mismatches: Vec<(&State, &State)> = config_start
+        .arr
+        .iter()
+        .flatten()
+        .zip(config_relative.arr.iter().flatten())
+        .filter(|(state1, state2)| state1 != state2)
+        .collect();
+
+    //let opponent_stone_taken = mismatches.iter().any(|(_index, (state1, state2))| **state1 == turn_color.flip_color());
+
+    let modified_stones: Vec<&(&State, &State)> = mismatches.iter().filter(|(state1, state2)| **state1 == turn_color || **state2 == turn_color).collect();
+    // if the player of turn_color took some stone, this should be true
+    let opponent_stone_taken = modified_stones.len() != mismatches.len();
+    let stone_moved = modified_stones.len() == 2;
+
+    // TODO im done of today...
+
+    //Move { action: (), take: () }
 }
