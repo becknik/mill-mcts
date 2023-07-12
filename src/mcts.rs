@@ -1,4 +1,4 @@
-use std::ops::Not;
+use std::{ops::Not, time::Instant};
 
 use id_tree::{Node, NodeId, Tree, TreeBuilder};
 use nanorand::{Rng, WyRand};
@@ -57,17 +57,17 @@ impl From<u32> for Phase {
 
 #[derive(PartialEq, Clone, Copy)]
 struct MCTSNodeContent {
-    config: Configuration,
-    move_count: u32,
+    conf: Configuration,
+    move_count: u32,     // to determine the game phase
     current_turn: State, // = player_color
     visit_count: u32,    // v_i
     win_count: u32,      // w_i
 }
 
 impl MCTSNodeContent {
-    fn new(config: Configuration, move_count: u32, current_turn: State) -> MCTSNodeContent {
+    fn new(conf: Configuration, move_count: u32, current_turn: State) -> MCTSNodeContent {
         MCTSNodeContent {
-            config,
+            conf,
             move_count,
             current_turn,
             visit_count: 0,
@@ -76,6 +76,10 @@ impl MCTSNodeContent {
     }
 
     /// Computes the value which is used to choose the best path to walk down the tree in the selection-phase
+    /// Takes care of the extreme cases:
+    /// - The node was not visited before => MAX is returned to use this node in the select-phase
+    /// - The node was visited before, but the win_count == 0 => 0f64 is returned to avoid NaN
+    ///   due to 0/v_i of the UTC formula
     fn calculate_uct(&self, parrent_node_visit_ount: f64) -> f64 {
         return if self.win_count == u32::MAX {
             f64::INFINITY
@@ -89,125 +93,145 @@ impl MCTSNodeContent {
 }
 
 /// Calculates Best Move for current Config
-pub fn mcts(config: &Configuration, move_count: u32, current_turn: State) -> Configuration {
-    let root_node_content = MCTSNodeContent::new(*config, move_count, current_turn);
+pub fn mcts(conf: &Configuration, move_count: u32, current_turn: State) -> Move {
+    let instant = Instant::now();
+
+    let root_node_content = MCTSNodeContent::new(*conf, move_count, current_turn);
 
     let mut tree = TreeBuilder::<MCTSNodeContent>::new()
         .with_node_capacity(TREE_INIT_NODE_COUNT)
         .with_root(Node::new(root_node_content))
         .build();
 
-    let mut buff = Vec::<Move>::new();
+    let mut simulation_buffer = Vec::<Move>::with_capacity(200);
 
-    // As long as time is available, do:
-    loop {
-        let node_max_uct = selction(&tree);
-        let nodes_expansion_id = expansion(&mut tree, node_max_uct);
+    while instant.elapsed().as_millis() < 1_000 {
+        for _i in 0..10_000 {
+            // Should be most left, non-visited leaf node on the path with the highest UCT value
+            let unexplored_leaf_node = selection(&tree);
 
-        let nodes_color = tree.get(&nodes_expansion_id).unwrap().data().current_turn;
-        let nodes_move_count = tree.get(&nodes_expansion_id).unwrap().data().move_count;
-        let nash = simulation(*config, nodes_color, nodes_move_count, current_turn, &mut buff);
+            // The unexplored leaf's child is now subjected by the following methods
+            let child_node_id = expansion(&mut tree, unexplored_leaf_node.0, unexplored_leaf_node.1);
+            let child_node = tree.get(&child_node_id).unwrap().data();
+
+            let child_nodes_nash =
+                simulation(*conf, child_node.current_turn, child_node.move_count, &mut simulation_buffer);
+
+            back_propagation(&mut tree, &child_node_id, child_nodes_nash);
+        }
     }
+
+    let moves = compute_moves(conf, Phase::from(move_count), current_turn);
+
+    let root_visit_count = tree.get(tree.root_node_id().unwrap()).unwrap().data().move_count;
+
+    // For mapping the configurations on the first tree niveau back to the Move struct needed by the main function
+    let selected = tree
+        .get(tree.root_node_id().unwrap())
+        .unwrap()
+        .children()
+        .iter()
+        .map(|node_id| tree.get(node_id).unwrap().data())
+        .map(|mcts_content| mcts_content.calculate_uct(root_visit_count as f64))
+        .enumerate()
+        .max_by(|(_i1, uct1), (_i2, uct2)| uct1.partial_cmp(uct2).unwrap());
+
+    moves[selected.unwrap().0]
 }
 
-fn apply_move(config: &Configuration, m: &Move, start_color: State) -> Configuration {
-    let mut modified_config = apply_action(config, m.action, start_color);
+fn apply_move(conf: &Configuration, m: &Move, current_turns_color: State) -> Configuration {
+    let mut modified_conf = apply_action(conf, m.action, current_turns_color);
     if let Some(to_take) = m.take {
-        modified_config.set(to_take, State::Empty);
+        modified_conf.set(to_take, State::Empty);
     }
-    modified_config
-}
-
-// TODO How to determine this?!
-fn get_phase(config: &Configuration) -> Option<Phase> {
-    let (white_count, black_count) = (count(config, State::White), count(config, State::Black));
-
-    Option::None
+    modified_conf
 }
 
 /// Selects ChildNode that hasn't been visited, which equals the leftmost child node where calculate_uct is `f64::INFINITY`
-fn selction(tree: &Tree<MCTSNodeContent>) -> (NodeId, MCTSNodeContent) {
+fn selection(tree: &Tree<MCTSNodeContent>) -> (NodeId, MCTSNodeContent) {
     let mut current_node_id = tree.root_node_id().unwrap();
-    let mut current_node = tree.get(current_node_id).unwrap();
+    let mut current_node: &MCTSNodeContent = tree.get(current_node_id).unwrap().data();
 
-    // Search the tree along the path with maximal UCT value until node is reached, which not was visited so far
-    while current_node.data().visit_count != 0 {
-        let child_ids = tree.children_ids(current_node_id).unwrap();
+    // Search the tree along the path with maximal UCT value until node is reached, which wasn't visited so far
+    while current_node.visit_count != 0 {
+        // Later needed for the calculation of the UCT value of the current nodes children
+        let current_nodes_visit_count = current_node.visit_count as f64;
+
+        let currents_child_ids = tree.children_ids(current_node_id).unwrap();
 
         // Selects a node with the highest UTC-value from the current nodes child nodes
-        let next_node_id = child_ids
-            .max_by(|id1, id2| {
-                let currents_visit_count = current_node.data().visit_count as f64;
+        (current_node_id, current_node) = currents_child_ids
+            .map(|node_id| (node_id, tree.get(node_id).unwrap().data()))
+            .filter(|(_, node)| !is_config_won_or_lost(&node.conf, Phase::from(node.move_count)))
+            .max_by(|(_, child_node1), (_, child_node2)| {
+                let uct1 = child_node1.calculate_uct(current_nodes_visit_count);
+                let uct2 = child_node2.calculate_uct(current_nodes_visit_count);
 
-                let node_1_uct = tree.get(id1).unwrap().data().calculate_uct(currents_visit_count);
-                let node_2_uct = tree.get(id2).unwrap().data().calculate_uct(currents_visit_count);
-
-                node_1_uct.total_cmp(&node_2_uct)
+                uct1.total_cmp(&uct2)
             })
             .unwrap();
-
-        // Move to the next niveau
-        current_node_id = next_node_id;
-        current_node = tree.get(current_node_id).unwrap();
     }
 
-    (current_node_id.clone(), *current_node.data())
+    (current_node_id.clone(), *current_node)
 }
 
-/// Adds (all 'suitable') child nodes of the givin node to the tree and returns NodeId from one of them randomly
-/// In Application: the selected Node.
-fn expansion(tree: &mut Tree<MCTSNodeContent>, leaf: (NodeId, MCTSNodeContent)) -> NodeId {
+/// Adds (all 'suitable') child nodes of the given node n to the tree by applying all possible moves on n
+/// Then returns one of the child nodes' NodeId randomly
+fn expansion(tree: &mut Tree<MCTSNodeContent>, node_id: NodeId, node: MCTSNodeContent) -> NodeId {
     use id_tree::InsertBehavior::*;
 
-    let (leaf_id, leaf_node) = leaf;
-    let current_move_color = leaf_node.current_turn;
-    let child_move_color = current_move_color.flip_color();
+    let child_nodes_turn_color = node.current_turn.flip_color();
+    let moves = compute_moves(&node.conf, Phase::from(node.move_count), node.current_turn);
 
-    let moves = compute_moves(&leaf_node.config, Phase::from(leaf_node.move_count), current_move_color);
     let child_node_ids: Vec<NodeId> = moves
         .iter()
-        .map(|m| apply_move(&leaf_node.config, m, current_move_color))
-        .map(|config| {
+        .map(|m| apply_move(&node.conf, m, node.current_turn))
+        .map(|mod_conf| {
             tree.insert(
-                Node::new(MCTSNodeContent::new(config, leaf_node.move_count + 1, child_move_color)),
-                UnderNode(&leaf_id),
+                Node::new(MCTSNodeContent::new(mod_conf, node.move_count + 1, child_nodes_turn_color)),
+                UnderNode(&node_id),
             )
             .unwrap()
         })
         .collect();
 
-    // TODO use some evaluation function right here
+    // TODO use some evaluation function right here to narrow the subtree width
     let i = unsafe { RNG.generate_range(0..child_node_ids.len()) };
     child_node_ids[i].clone()
 }
 
+/// Simulates a play-through from the leaf state parameters until one side has won the game & returns the nash value relative
+/// to the leaf node the computation started with.
 ///
+/// Uses the simulation_buffer to save some allocations.
 fn simulation(
-    leaf_config: Configuration,
+    leaf_conf: Configuration,
     leaf_color: State,
-    mut move_count: u32,
-    root_color: State,
-    buff: &mut Vec<Move>,
+    leaf_move_count: u32,
+    simulation_buffer: &mut Vec<Move>,
 ) -> Nash {
-    let mut current_config = leaf_config;
+    let mut current_conf = leaf_conf;
     let mut current_color = leaf_color;
+    let mut current_move_count = leaf_move_count;
+
     let mut nash = Nash::DRAW;
+    // Extreme case: The unvisited nodes leaf node already is won or lost.
+    update_nash_relative_to_leaf(&mut nash, &leaf_conf, leaf_color.flip_color(), leaf_color, Phase::from(leaf_move_count));
 
     // TODO break the function when the path is too long and there is a high possibility it is a draw
-    // While not-terminal-config do:
     while nash == Nash::DRAW {
-        apply_rand_move(&mut current_config, Phase::Moving, current_color, buff);
-        move_count += 1;
-        buff.clear();
+        apply_rand_move(
+            &mut current_conf,
+            if current_move_count < 18 { Phase::Placement } else { Phase::Moving },
+            current_color,
+            simulation_buffer,
+        );
+        simulation_buffer.clear();
+
+        current_move_count += 1;
         current_color = current_color.flip_color();
 
-        calculate_nash_for_leaf(&current_config, current_color, leaf_color, Phase::from(move_count), &mut nash);
-
-        /* let moves = compute_moves(&current_config, Phase::Moving /* TODO */, current_color);
-        let i = unsafe { RNG.generate_range(0..moves.len()) };
-        current_config = apply_move(&current_config, &moves[i], color); */
-
-        /* if is_terminal(current_config) {break calculate_nash(current_config, root_start);} */
+        update_nash_relative_to_leaf(&mut nash, &current_conf, current_color, leaf_color, Phase::from(leaf_move_count));
     }
     nash
 }
@@ -216,32 +240,32 @@ fn simulation(
 // TODO: Evalutation-Function instead of RNG
 fn apply_rand_move(conf: &mut Configuration, phase: Phase, color: State, buff: &mut Vec<Move>) {
     for_each_move(conf, phase, color, |m| buff.push(m));
+
+    if buff.is_empty() {
+        eprintln!("{conf:?}",);
+        panic!()
+    }
+
     let i = unsafe { RNG.generate_range(0..buff.len()) };
     *conf = apply_move(conf, &buff[i], color);
 }
 
-/// Calculates back probagated nash value for leaf color and updates it
-fn calculate_nash_for_leaf(
+/// Calculates nash value for only the current color relative to the leaf color & applies it on the `nash` value argument
+/// E.g. White made a move. Now the current_color should be chosen as black to check if black has lost.
+///      If so, the nash value is set to either won or lost, respectively to the leaf color which is the node the simulation started with
+fn update_nash_relative_to_leaf(
+    nash: &mut Nash,
     conf: &Configuration,
     current_color: State,
     leaf_color: State,
     phase: Phase,
-    nash: &mut Nash,
 ) {
     //nash is DRAW by default & stays like that during Placement-Phase due to the game being not decidable yet
     if phase == Phase::Placement {
         return;
     }
 
-    if count(conf, current_color) == 2 {
-        if current_color == leaf_color {
-            *nash = Nash::LOST;
-        } else {
-            *nash = Nash::WON;
-        }
-    }
-
-    if compute_moves(conf, Phase::Moving, current_color).is_empty() {
+    if count(conf, current_color) == 2 || compute_moves(conf, Phase::Moving, current_color).is_empty() {
         if current_color == leaf_color {
             *nash = Nash::LOST;
         } else {
@@ -250,7 +274,16 @@ fn calculate_nash_for_leaf(
     }
 }
 
-fn back_propagation(tree: &mut Tree<MCTSNodeContent>, leaf_id: NodeId, nash: i32, leaf_turn: State) {
+// TODO replace this with the nash calculation in the selection method
+fn is_config_won_or_lost(conf: &Configuration, phase: Phase) -> bool {
+    phase == Phase::Moving
+        && (count(conf, State::Black) == 2
+            || count(conf, State::White) == 2
+            || compute_moves(conf, Phase::Moving, State::Black).is_empty()
+            || compute_moves(conf, Phase::Moving, State::White).is_empty())
+}
+
+/* fn back_propagation(tree: &mut Tree<MCTSNodeContent>, leaf_id: NodeId, nash: i32, leaf_turn: State) {
     let mut current_node_id = leaf_id.clone();
     let mut current_node = tree.get_mut(&leaf_id).unwrap();
     let mut current_turn = leaf_turn;
@@ -268,5 +301,31 @@ fn back_propagation(tree: &mut Tree<MCTSNodeContent>, leaf_id: NodeId, nash: i32
             break;
         };
         current_turn = current_turn.flip_color();
+    }
+} */
+
+// so besser mit mut? weil danach brauchen wir den wert von der leaf nicht oder?
+fn back_propagation(tree: &mut Tree<MCTSNodeContent>, start_node_id: &NodeId, nash: Nash) {
+    let mut current_node_id = start_node_id.clone();
+    let mut current_node = tree.get_mut(&start_node_id).unwrap();
+
+    let mut current_nash = nash;
+
+    loop {
+        current_node.data_mut().visit_count += 1;
+        if current_nash == Nash::WON {
+            current_node.data_mut().win_count += 1;
+        }
+
+        (current_node_id, current_node) = if let Ok(ancenstor_ids) = tree.ancestor_ids(&current_node_id) {
+            // Any node should have exactly one parent
+            let parent_id = ancenstor_ids.last().unwrap();
+
+            (parent_id.clone(), tree.get_mut(&parent_id.clone()).unwrap())
+        } else {
+            break;
+        };
+
+        current_nash = !current_nash;
     }
 }

@@ -167,11 +167,18 @@ fn main() {
 
         let conf: Configuration = input.next().unwrap().parse().unwrap();
 
-        let moves = compute_moves(&conf, phase, color);
+        // If there is already some stone on the playfield when this ai starts processing, another ai/ player did a move already
+        if total_moves_made == 0 && (count(&conf, State::White) > 0 || count(&conf, State::Black) > 0) {
+            total_moves_made += 1;
+        }
+
+        let selected = mcts(&conf, total_moves_made, color);
+
+        /*         let moves = compute_moves(&conf, phase, color);
         let selectedd_move = mcts(&conf, total_moves_made, color);
 
         let i = unsafe { RNG_TEST.generate_range(0..moves.len()) };
-        let selected = moves[i];
+        let selected = moves[i]; */
         println!("{}", selected.to_string());
 
         total_moves_made += 2;
