@@ -160,9 +160,10 @@ fn selection(tree: &Tree<MCTSNodeContent>) -> (NodeId, MCTSNodeContent) {
         let currents_child_ids = tree.children_ids(current_node_id).unwrap();
 
         // Selects a node with the highest UTC-value from the current nodes child nodes
+        // Wen don't want terminal configs because we cant use expand on them & they should generally filtered because of UTC...
         (current_node_id, current_node) = currents_child_ids
             .map(|node_id| (node_id, tree.get(node_id).unwrap().data()))
-            .filter(|(_, node)| !is_config_won_or_lost(&node.conf, Phase::from(node.move_count)))
+            //.filter(|(_, node)| !is_config_won_or_lost(&node.conf, Phase::from(node.move_count)))
             .max_by(|(_, child_node1), (_, child_node2)| {
                 let uct1 = child_node1.calculate_uct(current_nodes_visit_count);
                 let uct2 = child_node2.calculate_uct(current_nodes_visit_count);
@@ -243,7 +244,6 @@ fn apply_rand_move(conf: &mut Configuration, phase: Phase, color: State, buff: &
 
     if buff.is_empty() {
         eprintln!("{conf:?}",);
-        panic!()
     }
 
     let i = unsafe { RNG.generate_range(0..buff.len()) };
@@ -307,21 +307,32 @@ fn is_config_won_or_lost(conf: &Configuration, phase: Phase) -> bool {
 // so besser mit mut? weil danach brauchen wir den wert von der leaf nicht oder?
 fn back_propagation(tree: &mut Tree<MCTSNodeContent>, start_node_id: &NodeId, nash: Nash) {
     let mut current_node_id = start_node_id.clone();
-    let mut current_node = tree.get_mut(&start_node_id).unwrap();
+    let mut current_node = tree.get_mut(&start_node_id).unwrap().data_mut();
 
     let mut current_nash = nash;
 
     loop {
-        current_node.data_mut().visit_count += 1;
+        current_node.visit_count += 1;
+
+        // Due to new nodes being initialized with u32::MAX, we have to manually reset them to 1/ 0 when visiting
+        // them the first time
         if current_nash == Nash::WON {
-            current_node.data_mut().win_count += 1;
+            if current_node.win_count == u32::MAX {
+                current_node.win_count = 1;
+            } else {
+                current_node.win_count += 1;
+            }
+        } else {
+            if current_node.win_count == u32::MAX {
+                current_node.win_count = 0;
+            }
         }
 
         (current_node_id, current_node) = if let Ok(ancenstor_ids) = tree.ancestor_ids(&current_node_id) {
             // Any node should have exactly one parent
             let parent_id = ancenstor_ids.last().unwrap();
 
-            (parent_id.clone(), tree.get_mut(&parent_id.clone()).unwrap())
+            (parent_id.clone(), tree.get_mut(&parent_id.clone()).unwrap().data_mut())
         } else {
             break;
         };
