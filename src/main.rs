@@ -1,3 +1,5 @@
+use std::fs::File;
+
 use nanorand::{Rng, WyRand};
 use once_cell::sync::Lazy;
 
@@ -145,6 +147,7 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
 
 fn main() {
     let mut total_moves_made = 0;
+    let file = File::open("moves-neccessary_for_win.log");
 
     loop {
         let mut input = String::new();
@@ -171,6 +174,7 @@ fn main() {
         if total_moves_made == 0 && (count(&conf, State::White) > 0 || count(&conf, State::Black) > 0) {
             total_moves_made += 1;
         }
+
 
         let selected = mcts(&conf, total_moves_made, color);
 
