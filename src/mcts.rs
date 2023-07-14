@@ -58,11 +58,9 @@ impl From<u32> for Phase {
 #[derive(PartialEq, Clone, Copy)]
 struct MCTSNodeContent {
     conf: Configuration,
-    move_count: u32,     // to determine the current game phase at every node of the tree
-    current_turn: State, // = player_color
-    visit_count: u32,    // v_i
-    win_count: u32,      // w_i
-    is_terminal_node: bool
+    visit_count: u32, // v_i
+    win_count: u32,   // w_i
+    is_terminal_node: bool,
 }
 
 impl MCTSNodeContent {
@@ -70,11 +68,9 @@ impl MCTSNodeContent {
     fn new(conf: Configuration, move_count: u32, current_turn: State) -> MCTSNodeContent {
         MCTSNodeContent {
             conf,
-            move_count,
-            current_turn,
             visit_count: 0,
             win_count: u32::MAX,
-            is_terminal_node : false,
+            is_terminal_node: false,
         }
     }
 
@@ -119,7 +115,7 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
         State::White => 0,
         State::Black => 1,
     };
-    assert!(start_turn_as_binary != u32::MAX);
+    assert!(start_turn_as_binary != u32::MAX); // avoid explicit panic!
 
     let mut simulation_buffer = Vec::<Move>::with_capacity(256);
 
@@ -131,49 +127,49 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
             let mut current_niveau: u32 = start_move_count;
 
             // Should always pick the most left, non-visited leaf node on the path with the highest UCT value
-            let unexplored_leaf_node = selection(&tree, &start_node_id, &mut current_niveau);
+            let (unexplored_leaf_node_id, unexplored_leaf_node) = selection(&tree, &start_node_id, &mut current_niveau);
 
-            // Extreme case: the selected, unexplored leaf node is some terminal (=already won/ lost) node in which some color already has won
-            //               In this case mark it as terminal node to avoid further selection & start the back_propagation on it
+            // Extreme case: the selected, unexplored leaf node is some terminal node (=already won/ lost).
+            // In this case mark it as terminal node to avoid further selection & start the back_propagation on it
 
+            let unexp_turn =
+                if current_niveau % 2 == start_turn_as_binary { start_turn } else { start_turn.flip_color() };
+            let unexp_phase = Phase::from(current_niveau);
+            let unexp_nash = get_relative_nash(&unexplored_leaf_node.conf, unexp_turn, start_turn, unexp_phase);
 
-            let unexploreds_turn = if current_niveau % 2 == start_turn_as_binary {start_turn} else {start_turn.flip_color()};
-            let unexploreds_phase = Phase::from(current_niveau);
-            let unexploreds_nash = get_relative_nash(&unexplored_leaf_node.1.conf, unexploreds_turn, start_turn, unexploreds_phase);
+            if unexp_nash != Nash::DRAW {
+                tree.get_mut(&unexplored_leaf_node_id).unwrap().data_mut().is_terminal_node = true;
 
-            if unexploreds_nash != Nash::DRAW {
-                tree.get_mut(&unexplored_leaf_node.0).unwrap().data_mut().is_terminal_node = true;
-
-                back_propagation(&mut tree, &unexplored_leaf_node.0, unexploreds_nash);
+                back_propagation(&mut tree, &unexplored_leaf_node_id, unexp_nash);
                 continue;
             }
 
             // A child node of the unexplored leaf node is now subjected by the following methods
-            let child_node_id = expansion(&mut tree, unexplored_leaf_node.0, unexplored_leaf_node.1);
+            let child_node_id =
+                expansion(&mut tree, unexplored_leaf_node_id, unexplored_leaf_node, current_niveau, unexp_turn);
             let child_node = tree.get(&child_node_id).unwrap().data();
-
             assert!(child_node.visit_count == 0);
+
             current_niveau += 1;
 
-            let child_nodes_turn = unexploreds_turn.flip_color();
+            // Extreme case from above, now for a niveau + 1...
+            let child_nodes_turn = unexp_turn.flip_color();
             let child_nodes_phase = Phase::from(current_niveau);
-            let child_nodes_nash = get_relative_nash(&child_node.conf, child_nodes_turn, start_turn, child_nodes_phase);
+            let mut child_nodes_nash =
+                get_relative_nash(&child_node.conf, child_nodes_turn, start_turn, child_nodes_phase);
 
             if child_nodes_nash != Nash::DRAW {
                 tree.get_mut(&child_node_id).unwrap().data_mut().is_terminal_node = true;
-
-                back_propagation(&mut tree, &child_node_id, child_nodes_nash);
-                continue;
+            } else {
+                child_nodes_nash =
+                    simulation(child_node.conf, child_nodes_turn, current_niveau, &mut simulation_buffer);
             }
-
-            let child_nodes_nash =
-                simulation(*start_conf, child_nodes_turn, current_niveau, &mut simulation_buffer);
 
             back_propagation(&mut tree, &child_node_id, child_nodes_nash);
         }
     }
 
-    let root_visit_count = tree.get(tree.root_node_id().unwrap()).unwrap().data().move_count as f64;
+    let root_visit_count = tree.get(tree.root_node_id().unwrap()).unwrap().data().visit_count as f64;
 
     // For mapping the configurations on the first tree niveau back to the Move struct needed by the main function
     let selected = tree
@@ -253,17 +249,22 @@ fn selection(tree: &Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: 
 
 /// Adds (all 'suitable') child nodes of the given node n to the tree by applying all possible moves on n
 /// Then returns one of the child nodes' NodeId randomly
-fn expansion(tree: &mut Tree<MCTSNodeContent>, node_id: NodeId, node: MCTSNodeContent) -> NodeId {
-    let child_nodes_turn_color = node.current_turn.flip_color();
-    let moves = compute_moves(&node.conf, Phase::from(node.move_count), node.current_turn);
+fn expansion(
+    tree: &mut Tree<MCTSNodeContent>,
+    node_id: NodeId,
+    node: MCTSNodeContent,
+    move_count: u32,
+    current_turn: State,
+) -> NodeId {
+    let moves = compute_moves(&node.conf, Phase::from(move_count), current_turn);
 
     // Inserting the possible moves applied on the current nodes Config into the tree as the current nodes children
     let child_node_ids: Vec<NodeId> = moves
         .iter()
-        .map(|m| apply_move(&node.conf, m, node.current_turn))
+        .map(|m| apply_move(&node.conf, m, current_turn))
         .map(|mod_conf| {
             tree.insert(
-                Node::new(MCTSNodeContent::new(mod_conf, node.move_count + 1, child_nodes_turn_color)),
+                Node::new(MCTSNodeContent::new(mod_conf, move_count + 1, current_turn.flip_color())),
                 id_tree::InsertBehavior::UnderNode(&node_id),
             )
             .unwrap()
@@ -286,35 +287,21 @@ fn simulation(
     simulation_buffer: &mut Vec<Move>,
 ) -> Nash {
     let mut current_conf = expanded_nodes_conf;
-    let mut current_color = expanded_nodes_turn;
+    let mut current_turn = expanded_nodes_turn;
     let mut current_move_count = expanded_nodes_move_count;
 
-    // Extreme case: The extended node already is won or lost
-    let mut current_nash = get_relative_nash(
-        &expanded_nodes_conf,
-        expanded_nodes_turn.flip_color(),
-        expanded_nodes_turn,
-        Phase::from(expanded_nodes_move_count),
-    );
+    let mut current_nash = Nash::DRAW;
 
     // TODO break the function when the path is too long and there is a high possibility it is a draw
-    // let mut a = 0;
     while current_nash == Nash::DRAW {
-        /* eprintln!("{a}");
-        a += 1; */
-
-        apply_rand_move(&mut current_conf, Phase::from(expanded_nodes_move_count), current_color, simulation_buffer);
+        apply_rand_move(&mut current_conf, Phase::from(current_move_count), current_turn, simulation_buffer);
         simulation_buffer.clear();
 
         current_move_count += 1;
-        current_color = current_color.flip_color();
+        current_turn = current_turn.flip_color();
 
-        current_nash = get_relative_nash(
-            &current_conf,
-            current_color,
-            expanded_nodes_turn,
-            Phase::from(current_move_count),
-        );
+        current_nash =
+            get_relative_nash(&current_conf, current_turn, expanded_nodes_turn, Phase::from(current_move_count));
     }
     current_nash
 }
@@ -337,12 +324,7 @@ fn apply_rand_move(conf: &mut Configuration, phase: Phase, color: State, buff: &
 ///
 /// E.g. White made a move. Now the current_color should be chosen as black to check if black has lost.
 ///      If so, the return value is set to either won or lost, respectively to the other color which is the node the simulation started with
-fn get_relative_nash(
-    conf: &Configuration,
-    current_turn: State,
-    other_turn: State,
-    phase_curent: Phase,
-) -> Nash {
+fn get_relative_nash(conf: &Configuration, current_turn: State, other_turn: State, phase_curent: Phase) -> Nash {
     // placement-phase is never a terminal state
     if phase_curent == Phase::Placement {
         return Nash::DRAW;
@@ -356,7 +338,7 @@ fn get_relative_nash(
         }
     } else {
         Nash::DRAW
-    }
+    };
 }
 
 fn are_moves_possible(conf: &Configuration, phase: Phase, current_color: State) -> bool {
@@ -368,14 +350,21 @@ fn are_moves_possible(conf: &Configuration, phase: Phase, current_color: State) 
 // TODO replace this with the nash calculation in the selection method
 /// Returns color who won
 fn is_config_won_or_lost(conf: &Configuration, phase: Phase) -> Option<State> {
+    if phase == Phase::Placement {
+        return Option::None;
+    }
 
-    if phase == Phase::Placement {return Option::None}
-
-    if count(conf, State::Black) == 2 {return Option::Some(State::White)}
-    else if count(conf, State::White) == 2 {return Option::Some(State::Black)}
-    else if compute_moves(conf, Phase::Moving, State::Black).is_empty() {return Option::Some(State::White)}
-    else if compute_moves(conf, Phase::Moving, State::White).is_empty() {return Option::Some(State::Black)}
-    else {return Option::None}
+    if count(conf, State::Black) == 2 {
+        return Option::Some(State::White);
+    } else if count(conf, State::White) == 2 {
+        return Option::Some(State::Black);
+    } else if compute_moves(conf, Phase::Moving, State::Black).is_empty() {
+        return Option::Some(State::White);
+    } else if compute_moves(conf, Phase::Moving, State::White).is_empty() {
+        return Option::Some(State::Black);
+    } else {
+        return Option::None;
+    }
 }
 
 // so besser mit mut? weil danach brauchen wir den wert von der leaf nicht oder?

@@ -146,6 +146,42 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
 }
 
 fn main() {
+/*     let arr = [
+        [
+            State::Empty,
+            State::Black,
+            State::Empty,
+            State::White,
+            State::Empty,
+            State::Empty,
+            State::Empty,
+            State::White,
+        ],
+        [
+            State::Empty,
+            State::Empty,
+            State::Black,
+            State::Empty,
+            State::Empty,
+            State::Black,
+            State::Black,
+            State::Empty,
+        ],
+        [
+            State::White,
+            State::Empty,
+            State::Empty,
+            State::White,
+            State::White,
+            State::Empty,
+            State::Black,
+            State::Empty,
+        ],
+    ];
+
+    mcts(&Configuration { arr }, 0, State::White);
+    return; */
+
     let mut total_moves_made = 0;
     let file = File::open("moves-neccessary_for_win.log");
 
@@ -174,7 +210,6 @@ fn main() {
         if total_moves_made == 0 && (count(&conf, State::White) > 0 || count(&conf, State::Black) > 0) {
             total_moves_made += 1;
         }
-
 
         let selected = mcts(&conf, total_moves_made, color);
 
