@@ -24,4 +24,5 @@ lto = "thin" # might be preferable
 #lto = true # = fat lto, seems to decrease performance?!
 codegen-units = 1 # disable codegen unit parallelization to higher the optimization potential
 panic = "abort" # disables catch or unwind panics, reduces binary size & might increase performance slightly
-strip = true
+#strip = true
+debug = true

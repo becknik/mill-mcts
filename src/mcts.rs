@@ -116,7 +116,7 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
         State::Black => 1,
     };
 
-    let mut simulation_buffer = Vec::<Move>::with_capacity(256);
+    let mut conf_buf = Vec::<(Configuration, i32)>::with_capacity(256);
 
     while instant.elapsed().as_millis() < 1_000 {
         for _i in 0..10_000 {
@@ -143,8 +143,16 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
             }
 
             // A child node of the unexplored leaf node is now subjected by the following methods
-            let child_node_id =
-                expansion(&mut tree, unexplored_leaf_node_id, unexplored_leaf_node, current_niveau, unexp_turn);
+            let child_node_id = expansion(
+                &mut tree,
+                unexplored_leaf_node_id,
+                unexplored_leaf_node,
+                current_niveau,
+                unexp_turn,
+                &mut conf_buf,
+            );
+            conf_buf.clear();
+
             let child_node = tree.get(&child_node_id).unwrap().data();
             assert!(child_node.visit_count == 0);
 
@@ -160,7 +168,7 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
                 tree.get_mut(&child_node_id).unwrap().data_mut().is_terminal_node = true;
             } else {
                 child_nodes_nash =
-                    simulation(child_node.conf, child_nodes_turn, current_niveau, &mut simulation_buffer);
+                    simulation(child_node.conf, child_nodes_turn, current_niveau, &mut conf_buf);
             }
 
             back_propagation(&mut tree, &child_node_id, child_nodes_nash);
@@ -247,48 +255,56 @@ fn selection(tree: &Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: 
 fn expansion(
     tree: &mut Tree<MCTSNodeContent>,
     node_id: NodeId,
-    node: MCTSNodeContent,
+    mut node: MCTSNodeContent,
     move_count: u32,
     current_turn: State,
+    buff: &mut Vec<(Configuration, i32)>,
 ) -> NodeId {
-    let moves = compute_moves(&node.conf, Phase::from(move_count), current_turn);
+    compute_best_configs(&mut node.conf, Phase::from(move_count), current_turn, buff);
 
     // Inserting the possible moves applied on the current nodes Config into the tree as the current nodes children
-    let child_node_ids: Vec<NodeId> = moves
+    let child_node_ids: Vec<NodeId> = buff
         .iter()
-        .map(|m| apply_move(&node.conf, m, current_turn))
-        .map(|mod_conf| {
+        .map(|(mod_conf, _)| {
             tree.insert(
-                Node::new(MCTSNodeContent::new(mod_conf, move_count + 1, current_turn.flip_color())),
+                Node::new(MCTSNodeContent::new(*mod_conf, move_count + 1, current_turn.flip_color())),
                 id_tree::InsertBehavior::UnderNode(&node_id),
             )
             .unwrap()
         })
         .collect();
 
-    // TODO use some evaluation function right here to narrow the subtree width
-    let i = unsafe { RNG.generate_range(0..child_node_ids.len()) };
-    child_node_ids[i].clone()
+        let i = unsafe { RNG.generate_range(0..buff.len())};
+        child_node_ids[i].clone()
 }
 
-fn compute_best_configs(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<(Configuration, u32)>) {
-    let mut sum = 0;
+fn compute_best_configs(
+    conf: &mut Configuration,
+    phase: Phase,
+    current_turn: State,
+    buff: &mut Vec<(Configuration, i32)>,
+) {
+    let mut sum: i32 = 0;
 
     for_each_move(&conf.clone(), phase, current_turn, |m| {
-        let (conf ,rating) = evaluate_move(conf, m, phase, current_turn);
+        let (conf, rating) = evaluate_move(conf, m, phase, current_turn);
         sum += rating;
 
         buff.push((conf, rating));
     });
 
-    buff.iter().skip_while(|tuple| {
-        sum -= tuple.1;
-        sum >= 0
-    });
+    let median = sum / buff.len() as i32; // TODO maybe use percentile (=1/2, 1/3) cut-off instead of median???
+
+    *buff = buff
+        .iter()
+        .map(|tuple| *tuple)
+        //.filter(|(_, rating)| median <= *rating)
+        .filter(|(_, rating)| if buff.len() as i32 <= sum { median <= *rating } else { median < *rating })
+        .collect();
 }
 
-fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, u32) {
-    let mut rating: u32 = 1;
+fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, i32) {
+    let mut rating: i32 = 1;
 
     let mod_conf = apply_move(conf, &m, current_turn);
     let target_position = match m.action {
@@ -317,35 +333,58 @@ fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: 
             let on_ring_state_previous = conf.arr[target_position.0 as usize][((target_position.1 + 7) % 8) as usize];
 
             if (on_ring_state_next == current_turn && on_ring_state_previous == State::Empty)
-                | (on_ring_state_next == State::Empty && on_ring_state_previous == current_turn) {
+                | (on_ring_state_next == State::Empty && on_ring_state_previous == current_turn)
+            {
                 rating += 1;
             }
 
             let across_rings_state_next = conf.arr[((target_position.0 + 1) % 3) as usize][target_position.1 as usize];
-            let across_rings_state_previous = conf.arr[((target_position.0 + 2) % 3) as usize][target_position.1 as usize];
+            let across_rings_state_previous =
+                conf.arr[((target_position.0 + 2) % 3) as usize][target_position.1 as usize];
 
             if (across_rings_state_next == current_turn && across_rings_state_previous == State::Empty)
-                | (across_rings_state_next == State::Empty && across_rings_state_previous == current_turn) {
+                | (across_rings_state_next == State::Empty && across_rings_state_previous == current_turn)
+            {
                 rating += 1;
             }
         } else {
             // check corner placement for possible muehle trap setup
-            let next_on_ring_state = conf.arr[target_position.0 as usize][(target_position.1 + 1) as usize];
+            let next_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 + 1) % 8) as usize];
             let next_next_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 + 2) % 8) as usize];
 
-            let previous_on_ring_state = conf.arr[target_position.0 as usize][(target_position.1 - 1) as usize];
-            let previous_previous_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 + 6) % 8) as usize];
+            let previous_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 - 1) % 8) as usize];
+            let previous_previous_on_ring_state =
+                conf.arr[target_position.0 as usize][((target_position.1 + 6) % 8) as usize];
 
             if ((next_on_ring_state == current_turn && next_next_on_ring_state == State::Empty)
                 | (next_on_ring_state == State::Empty && next_next_on_ring_state == current_turn))
                 && ((previous_on_ring_state == current_turn && previous_previous_on_ring_state == State::Empty)
-                | (previous_on_ring_state == State::Empty && previous_previous_on_ring_state == current_turn)) {
-                    rating += 2;
+                    | (previous_on_ring_state == State::Empty && previous_previous_on_ring_state == current_turn))
+            {
+                rating += 2;
             }
         }
     }
     (mod_conf, rating)
 }
+
+/* fn weighted_conf_selection(buff: &Vec<(Configuration, i32)>) -> usize {
+    let sum_of_ratings = buff.iter().map(|(_, rating)| rating).sum();
+
+    let selection = unsafe {RNG.generate_range(0..sum_of_ratings)};
+    let mut commutative_rating = 0;
+    let mut index: usize = 0;
+
+    for (_conf, rating) in buff {
+        commutative_rating += *rating;
+
+        if selection <= commutative_rating {
+            return index;
+        }
+        index += 1;
+    }
+    panic!()
+} */
 
 /// Simulates a play-through from the expansion nodes state parameters until one side has won the game &
 /// returns the nash value relative to the leaf node the computation started with.
@@ -355,7 +394,7 @@ fn simulation(
     expanded_nodes_conf: Configuration,
     expanded_nodes_turn: State,
     expanded_nodes_move_count: u32,
-    simulation_buffer: &mut Vec<Move>,
+    conf_buf: &mut Vec<(Configuration, i32)>,
 ) -> Nash {
     let mut current_conf = expanded_nodes_conf;
     let mut current_turn = expanded_nodes_turn;
@@ -365,8 +404,8 @@ fn simulation(
 
     // TODO break the function when the path is too long and there is a high possibility it is a draw
     while current_nash == Nash::DRAW {
-        apply_rand_move(&mut current_conf, Phase::from(current_move_count), current_turn, simulation_buffer);
-        simulation_buffer.clear();
+        current_conf = get_rand_move(&mut current_conf, Phase::from(current_move_count), current_turn, conf_buf);
+        conf_buf.clear();
 
         current_move_count += 1;
         current_turn = current_turn.flip_color();
@@ -378,12 +417,11 @@ fn simulation(
 }
 
 /// Computes possible moves from config, chooses one randomly, updates config with new one
-// TODO: Evalutation-Function instead of RNG
-fn apply_rand_move(conf: &mut Configuration, phase: Phase, color: State, buff: &mut Vec<Move>) {
-    for_each_move(conf, phase, color, |m| buff.push(m));
+fn get_rand_move(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<(Configuration, i32)>) -> Configuration {
+    compute_best_configs(conf, phase, current_turn, buff);
 
-    let i = unsafe { RNG.generate_range(0..buff.len()) };
-    *conf = apply_move(conf, &buff[i], color);
+    let i = unsafe { RNG.generate_range(0..buff.len())};
+    buff[i].0
 }
 
 /// Calculates the nash value for only the current turn relative to the other turn. It checks if the conf is won or
