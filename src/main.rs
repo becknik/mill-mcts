@@ -146,7 +146,7 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
 }
 
 fn main() {
-     let arr = [
+    let arr = [
         [
             State::Empty,
             State::Black,

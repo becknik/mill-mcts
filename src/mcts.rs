@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use crate::{
     compute_moves, count,
     ds::{apply_action, Action, Configuration, Move, Phase, State},
-    for_each_move, is_muhle,
+    for_each_move, is_corner, is_muhle,
 };
 
 pub static mut RNG: Lazy<WyRand> = Lazy::new(|| WyRand::new());
@@ -271,44 +271,79 @@ fn expansion(
     child_node_ids[i].clone()
 }
 
-fn compute_best_configs(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<Configuration>) {
-    for_each_move(conf, phase, current_turn, |m| {
-        let tupel = evaluate_move(conf, m, phase, current_turn);
+fn compute_best_configs(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<(Configuration, u32)>) {
+    let mut sum = 0;
 
-        buff.push(tupel.0);
+    for_each_move(&conf.clone(), phase, current_turn, |m| {
+        let (conf ,rating) = evaluate_move(conf, m, phase, current_turn);
+        sum += rating;
+
+        buff.push((conf, rating));
+    });
+
+    buff.iter().skip_while(|tuple| {
+        sum -= tuple.1;
+        sum >= 0
     });
 }
 
-fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, i32) {
-    let mut rating: i32 = 0;
+fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, u32) {
+    let mut rating: u32 = 1;
 
     let mod_conf = apply_move(conf, &m, current_turn);
+    let target_position = match m.action {
+        Action::Place(place_pos) => place_pos,
+        Action::Move(_, target_pos) => target_pos,
+    };
 
-    if phase == Phase::Placement {
-        let mill_count = is_muhle(conf, if let crate::mcts::Action::Place(place_pos) = m.action {
-            place_pos
-        } else {
-            panic!()
-        });
+    let oponent_move_simulation = apply_move(conf, &m, current_turn.flip_color());
 
-    } else {
-        let mill_count = is_muhle(conf, if let crate::mcts::Action::Move(_, move_pos) = m.action {
-            move_pos
-        } else {
-            panic!()
-        });
-
-        let opponent_stone_count = count(conf, current_turn.flip_color());
-        let opponent_stone_count_am = count(&mod_conf, current_turn.flip_color());
-        if opponent_stone_count> opponent_stone_count_am {
-            rating += 2;
-        }
-
+    // mill check self
+    let opponent_stone_count = count(conf, current_turn.flip_color());
+    let opponent_stone_count_after_move = count(&mod_conf, current_turn.flip_color());
+    if opponent_stone_count > opponent_stone_count_after_move {
+        rating += 3;
+    }
+    // Avoid a mill of the opponent by using placing a stone in a two stone mill
+    else if is_muhle(&oponent_move_simulation, target_position) {
+        rating += 3;
     }
 
-    //mühle check
-    if
+    if phase == Phase::Placement {
+        if !is_corner(target_position) {
+            rating += 2;
 
+            let on_ring_state_next = conf.arr[target_position.0 as usize][((target_position.1 + 1) % 8) as usize];
+            let on_ring_state_previous = conf.arr[target_position.0 as usize][((target_position.1 + 7) % 8) as usize];
+
+            if (on_ring_state_next == current_turn && on_ring_state_previous == State::Empty)
+                | (on_ring_state_next == State::Empty && on_ring_state_previous == current_turn) {
+                rating += 1;
+            }
+
+            let across_rings_state_next = conf.arr[((target_position.0 + 1) % 3) as usize][target_position.1 as usize];
+            let across_rings_state_previous = conf.arr[((target_position.0 + 2) % 3) as usize][target_position.1 as usize];
+
+            if (across_rings_state_next == current_turn && across_rings_state_previous == State::Empty)
+                | (across_rings_state_next == State::Empty && across_rings_state_previous == current_turn) {
+                rating += 1;
+            }
+        } else {
+            // check corner placement for possible muehle trap setup
+            let next_on_ring_state = conf.arr[target_position.0 as usize][(target_position.1 + 1) as usize];
+            let next_next_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 + 2) % 8) as usize];
+
+            let previous_on_ring_state = conf.arr[target_position.0 as usize][(target_position.1 - 1) as usize];
+            let previous_previous_on_ring_state = conf.arr[target_position.0 as usize][((target_position.1 + 6) % 8) as usize];
+
+            if ((next_on_ring_state == current_turn && next_next_on_ring_state == State::Empty)
+                | (next_on_ring_state == State::Empty && next_next_on_ring_state == current_turn))
+                && ((previous_on_ring_state == current_turn && previous_previous_on_ring_state == State::Empty)
+                | (previous_on_ring_state == State::Empty && previous_previous_on_ring_state == current_turn)) {
+                    rating += 2;
+            }
+        }
+    }
     (mod_conf, rating)
 }
 
