@@ -146,7 +146,7 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
 }
 
 fn main() {
-/*     let arr = [
+     let arr = [
         [
             State::Empty,
             State::Black,
@@ -179,8 +179,8 @@ fn main() {
         ],
     ];
 
-    mcts(&Configuration { arr }, 0, State::White);
-    return; */
+    mcts(&Configuration { arr }, 10, State::White);
+    return;
 
     let mut total_moves_made = 0;
     let file = File::open("moves-neccessary_for_win.log");

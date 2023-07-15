@@ -1,4 +1,4 @@
-use std::{mem::take, ops::Not, time::Instant};
+use std::{ops::Not, time::Instant};
 
 use id_tree::{Node, NodeId, Tree, TreeBuilder};
 use nanorand::{Rng, WyRand};
@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use crate::{
     compute_moves, count,
     ds::{apply_action, Action, Configuration, Move, Phase, State},
-    for_each_move,
+    for_each_move, is_muhle,
 };
 
 pub static mut RNG: Lazy<WyRand> = Lazy::new(|| WyRand::new());
@@ -109,13 +109,12 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
 
     let start_node_id = tree.root_node_id().unwrap().clone();
     // The start_turn might be black or white, so to determine if the current turn is the same as the start_turn by using
-    // a primitive move counter it's rest-class-ring over 2 is needed later
+    // a primitive move counter it's rest-ring-class over 2 is needed later
     let start_turn_as_binary = match start_turn {
-        State::Empty => u32::MAX,
+        State::Empty => panic!(),
         State::White => 0,
         State::Black => 1,
     };
-    assert!(start_turn_as_binary != u32::MAX); // avoid explicit panic!
 
     let mut simulation_buffer = Vec::<Move>::with_capacity(256);
 
@@ -129,14 +128,13 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
             // Should always pick the most left, non-visited leaf node on the path with the highest UCT value
             let (unexplored_leaf_node_id, unexplored_leaf_node) = selection(&tree, &start_node_id, &mut current_niveau);
 
-            // Extreme case: the selected, unexplored leaf node is some terminal node (=already won/ lost).
-            // In this case mark it as terminal node to avoid further selection & start the back_propagation on it
-
             let unexp_turn =
                 if current_niveau % 2 == start_turn_as_binary { start_turn } else { start_turn.flip_color() };
             let unexp_phase = Phase::from(current_niveau);
             let unexp_nash = get_relative_nash(&unexplored_leaf_node.conf, unexp_turn, start_turn, unexp_phase);
 
+            // Extreme case: the selected, unexplored leaf node is some terminal node (=already won/ lost).
+            // In this case mark it as terminal node to avoid further selection & start the back_propagation on it
             if unexp_nash != Nash::DRAW {
                 tree.get_mut(&unexplored_leaf_node_id).unwrap().data_mut().is_terminal_node = true;
 
@@ -193,9 +191,6 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
         selected.visit_count
     );
 
-    // TODO map the config from selected back to move? Maybe better solution I cant think of atm.
-    // TODO Commented out lead to out of bounds, strangely. Is the order of the nodes inserted into the id-tree random or are there maybe more nodes added to the id tree than the ones from `calculate_moves`???
-
     convert_config_to_move(*start_conf, start_turn, selected.conf)
 }
 
@@ -228,7 +223,7 @@ fn selection(tree: &Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: 
         let currents_child_ids = tree.children_ids(current_node_id).unwrap();
 
         // Selects a node with the highest UTC-value from the current nodes child nodes
-        // Terminal configs should generally be filtered because of UTC... ?! TODO
+        // Terminal configs should generally be filtered because of UTC
         let child_node_with_max_utc = currents_child_ids
             .map(|node_id| (node_id, tree.get(node_id).unwrap().data()))
             .filter(|(_, node)| !node.is_terminal_node)
@@ -276,6 +271,47 @@ fn expansion(
     child_node_ids[i].clone()
 }
 
+fn compute_best_configs(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<Configuration>) {
+    for_each_move(conf, phase, current_turn, |m| {
+        let tupel = evaluate_move(conf, m, phase, current_turn);
+
+        buff.push(tupel.0);
+    });
+}
+
+fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, i32) {
+    let mut rating: i32 = 0;
+
+    let mod_conf = apply_move(conf, &m, current_turn);
+
+    if phase == Phase::Placement {
+        let mill_count = is_muhle(conf, if let crate::mcts::Action::Place(place_pos) = m.action {
+            place_pos
+        } else {
+            panic!()
+        });
+
+    } else {
+        let mill_count = is_muhle(conf, if let crate::mcts::Action::Move(_, move_pos) = m.action {
+            move_pos
+        } else {
+            panic!()
+        });
+
+        let opponent_stone_count = count(conf, current_turn.flip_color());
+        let opponent_stone_count_am = count(&mod_conf, current_turn.flip_color());
+        if opponent_stone_count> opponent_stone_count_am {
+            rating += 2;
+        }
+
+    }
+
+    //mühle check
+    if
+
+    (mod_conf, rating)
+}
+
 /// Simulates a play-through from the expansion nodes state parameters until one side has won the game &
 /// returns the nash value relative to the leaf node the computation started with.
 ///
@@ -310,10 +346,6 @@ fn simulation(
 // TODO: Evalutation-Function instead of RNG
 fn apply_rand_move(conf: &mut Configuration, phase: Phase, color: State, buff: &mut Vec<Move>) {
     for_each_move(conf, phase, color, |m| buff.push(m));
-
-    if buff.is_empty() {
-        eprintln!("{conf:?}",);
-    }
 
     let i = unsafe { RNG.generate_range(0..buff.len()) };
     *conf = apply_move(conf, &buff[i], color);
