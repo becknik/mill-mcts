@@ -65,11 +65,11 @@ struct MCTSNodeContent {
 
 impl MCTSNodeContent {
     /// Initializes the win_count with max because of UCT selection perfering those with win_count == u32::MAX
-    fn new(conf: Configuration, move_count: u32, current_turn: State) -> MCTSNodeContent {
+    fn new(conf: Configuration, win_count: u32, visit_count: u32) -> MCTSNodeContent {
         MCTSNodeContent {
             conf,
-            visit_count: 0,
-            win_count: u32::MAX,
+            visit_count,
+            win_count,
             is_terminal_node: false,
         }
     }
@@ -86,7 +86,11 @@ impl MCTSNodeContent {
         }
         // To avoid (0f64 / 1f64) which evaluates to NaN?
         else if self.win_count == 0 {
-            0f64
+            if self.visit_count != 0 {
+                f64::sqrt(f64::ln(parent_node_visit_count) / self.visit_count as f64)
+            } else {
+                0f64
+            }
         }
         // Do the actual formula
         else {
@@ -100,7 +104,7 @@ impl MCTSNodeContent {
 pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State) -> Move {
     let instant = Instant::now();
 
-    let start_node_content = MCTSNodeContent::new(*start_conf, start_move_count, start_turn);
+    let start_node_content = MCTSNodeContent::new(*start_conf, u32::MAX, 0);
 
     let mut tree = TreeBuilder::<MCTSNodeContent>::new()
         .with_node_capacity(TREE_INIT_NODE_COUNT)
@@ -116,9 +120,9 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
         State::Black => 1,
     };
 
-    let mut conf_buf = Vec::<(Configuration, i32)>::with_capacity(256);
+    let mut conf_buf = Vec::<(Configuration, u32)>::with_capacity(256);
 
-    while instant.elapsed().as_millis() < 1_000 {
+    'outer: while instant.elapsed().as_millis() < 1_000 {
         for _i in 0..10_000 {
             // Perhaps the tree would never be deconstructed, then the niveau we currently are on equals the amount of
             // moves made on the playfield configuration
@@ -126,7 +130,13 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
             let mut current_niveau: u32 = start_move_count;
 
             // Should always pick the most left, non-visited leaf node on the path with the highest UCT value
-            let (unexplored_leaf_node_id, unexplored_leaf_node) = selection(&tree, &start_node_id, &mut current_niveau);
+            let (unexplored_leaf_node_id, unexplored_leaf_node) = match selection(&mut tree, &start_node_id, &mut current_niveau) {
+                Some(tuple) => tuple,
+                None => break 'outer,
+            };
+            // if Phase::from(start_move_count) == Phase::Placement && Phase::from(current_niveau) == Phase::Moving {
+            //     break 'outer;
+            // }
 
             let unexp_turn =
                 if current_niveau % 2 == start_turn_as_binary { start_turn } else { start_turn.flip_color() };
@@ -153,6 +163,10 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
             );
             conf_buf.clear();
 
+            if Phase::from(start_move_count) == Phase::Placement {
+                return convert_config_to_move(start_conf.clone(), start_turn, tree.get(&child_node_id).unwrap().data().conf)
+            }
+
             let child_node = tree.get(&child_node_id).unwrap().data();
             assert!(child_node.visit_count == 0);
 
@@ -166,6 +180,7 @@ pub fn mcts(start_conf: &Configuration, start_move_count: u32, start_turn: State
 
             if child_nodes_nash != Nash::DRAW {
                 tree.get_mut(&child_node_id).unwrap().data_mut().is_terminal_node = true;
+            // } else if Phase::from(start_move_count + 2) != Phase::Placement {
             } else {
                 child_nodes_nash =
                     simulation(child_node.conf, child_nodes_turn, current_niveau, &mut conf_buf);
@@ -216,9 +231,9 @@ fn apply_move(conf: &Configuration, m: &Move, current_turns_color: State) -> Con
 ///
 /// Uses the `current_niveau` variable to keep track on which niveau the returned node tuple is on, which is important for
 /// determination of the game phase & nash value
-fn selection(tree: &Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: &mut u32) -> (NodeId, MCTSNodeContent) {
-    let mut current_node_id: &NodeId = start_node;
-    let mut current_node: &MCTSNodeContent = tree.get(start_node).unwrap().data();
+fn selection(tree: &mut Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: &mut u32) -> Option<(NodeId, MCTSNodeContent)> {
+    let mut current_node_id: NodeId = start_node.clone();
+    let mut current_node: MCTSNodeContent = tree.get(start_node).unwrap().data().clone();
 
     // Search the tree along the path with maximal UCT value until node is reached, which wasn't visited so far
     // as long as current_node.visit_count != 0 || 1 due to
@@ -228,26 +243,39 @@ fn selection(tree: &Tree<MCTSNodeContent>, start_node: &NodeId, current_niveau: 
         // Later needed for the calculation of the UCT value of the current nodes children
         let current_nodes_visit_count = current_node.visit_count as f64;
 
-        let currents_child_ids = tree.children_ids(current_node_id).unwrap();
+        let currents_child_ids = tree.children_ids(&current_node_id).unwrap();
 
         // Selects a node with the highest UTC-value from the current nodes child nodes
         // Terminal configs should generally be filtered because of UTC
         let child_node_with_max_utc = currents_child_ids
             .map(|node_id| (node_id, tree.get(node_id).unwrap().data()))
             .filter(|(_, node)| !node.is_terminal_node)
-            //.filter(|(_, node)| !is_config_won_or_lost(&node.conf, Phase::from(node.move_count)))
             .max_by(|(_, child_node1), (_, child_node2)| {
                 let uct1 = child_node1.calculate_uct(current_nodes_visit_count);
                 let uct2 = child_node2.calculate_uct(current_nodes_visit_count);
 
                 uct1.total_cmp(&uct2)
-            })
-            .unwrap();
+            });
 
-        (current_node_id, current_node) = child_node_with_max_utc;
+        // Extreme case: The parent current node only contains childs which are terminal nodes. Therefore the current
+        // node must also be flagged as is_terminal_node to avoid being on the selection path the next iteration
+        (current_node_id, current_node) = match child_node_with_max_utc {
+            Some(node_tuple) => (node_tuple.0.clone(), node_tuple.1.clone()),
+            None => {
+                tree.get_mut(&current_node_id).unwrap().data_mut().is_terminal_node = true;
+
+                let parent_node_id = match tree.ancestor_ids(&current_node_id).unwrap().next() {
+                    Some(parent) => parent.clone(),
+                    None => return Option::None,
+                };
+                let parent_node = tree.get(&parent_node_id).unwrap().data().clone();
+
+                (parent_node_id, parent_node)
+            },
+        };
     }
 
-    (current_node_id.clone(), *current_node)
+    Option::Some((current_node_id.clone(), current_node))
 }
 
 /// Adds (all 'suitable') child nodes of the given node n to the tree by applying all possible moves on n
@@ -258,33 +286,48 @@ fn expansion(
     mut node: MCTSNodeContent,
     move_count: u32,
     current_turn: State,
-    buff: &mut Vec<(Configuration, i32)>,
+    buff: &mut Vec<(Configuration, u32)>,
 ) -> NodeId {
     compute_best_configs(&mut node.conf, Phase::from(move_count), current_turn, buff);
 
-    // Inserting the possible moves applied on the current nodes Config into the tree as the current nodes children
-    let child_node_ids: Vec<NodeId> = buff
-        .iter()
-        .map(|(mod_conf, _)| {
-            tree.insert(
-                Node::new(MCTSNodeContent::new(*mod_conf, move_count + 1, current_turn.flip_color())),
-                id_tree::InsertBehavior::UnderNode(&node_id),
-            )
-            .unwrap()
-        })
-        .collect();
+        if Phase::from(move_count) == Phase::Placement {
+            let node_with_best_rating = buff.iter().map(|(conf, rating)| {
+                let node_id = tree.insert(
+                    Node::new(MCTSNodeContent::new(*conf, *rating, 1)),
+                    id_tree::InsertBehavior::UnderNode(&node_id),
+                )
+                .unwrap();
 
-        let i = unsafe { RNG.generate_range(0..buff.len())};
-        child_node_ids[i].clone()
+            (rating, node_id)
+            })
+            .max_by(|(rating1, _), (rating2, _)| rating1.cmp(rating2)).unwrap();
+
+        return node_with_best_rating.1.clone();
+        } else {
+            // Inserting the possible moves applied on the current nodes Config into the tree as the current nodes children
+            let child_node_ids: Vec<NodeId> = buff
+                .iter()
+                .map(|(conf, rating)| {
+                    tree.insert(
+                        Node::new(MCTSNodeContent::new(*conf, *rating, 0)),
+                        id_tree::InsertBehavior::UnderNode(&node_id),
+                    )
+                    .unwrap()
+                })
+                .collect();
+
+            let i = unsafe { RNG.generate_range(0..buff.len())};
+            return child_node_ids[i].clone()
+        };
 }
 
 fn compute_best_configs(
     conf: &mut Configuration,
     phase: Phase,
     current_turn: State,
-    buff: &mut Vec<(Configuration, i32)>,
+    buff: &mut Vec<(Configuration, u32)>,
 ) {
-    let mut sum: i32 = 0;
+    let mut sum: u32 = 0;
 
     for_each_move(&conf.clone(), phase, current_turn, |m| {
         let (conf, rating) = evaluate_move(conf, m, phase, current_turn);
@@ -293,49 +336,61 @@ fn compute_best_configs(
         buff.push((conf, rating));
     });
 
-    let median = sum / buff.len() as i32; // TODO maybe use percentile (=1/2, 1/3) cut-off instead of median???
+    let median = sum / buff.len() as u32; // TODO maybe use percentile (=1/2, 1/3) cut-off instead of median???
 
     *buff = buff
         .iter()
         .map(|tuple| *tuple)
-        //.filter(|(_, rating)| median <= *rating)
-        .filter(|(_, rating)| if buff.len() as i32 <= sum { median <= *rating } else { median < *rating })
+        .filter(|(_, rating)| median <= *rating)
+        //.filter(|(_, rating)| if buff.len() as i32 <= sum { median <= *rating } else { median < *rating })
         .collect();
 }
 
-fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, i32) {
-    let mut rating: i32 = 1;
+fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: State) -> (Configuration, u32) {
+    let mut rating: u32 = 0;
 
-    let mod_conf = apply_move(conf, &m, current_turn);
     let target_position = match m.action {
         Action::Place(place_pos) => place_pos,
         Action::Move(_, target_pos) => target_pos,
     };
+
+    let mod_conf = apply_move(conf, &m, current_turn);
 
     let oponent_move_simulation = apply_move(conf, &m, current_turn.flip_color());
 
     // mill check self
     let opponent_stone_count = count(conf, current_turn.flip_color());
     let opponent_stone_count_after_move = count(&mod_conf, current_turn.flip_color());
+
+    let mut move_blocks_oponent_mill = false;
     if opponent_stone_count > opponent_stone_count_after_move {
-        rating += 3;
+        rating += 10;
     }
     // Avoid a mill of the opponent by using placing a stone in a two stone mill
     else if is_muhle(&oponent_move_simulation, target_position) {
-        rating += 3;
+        move_blocks_oponent_mill = true;
+        rating += 2;
+        if opponent_stone_count == 3 {
+            rating += 10;
+        }
     }
 
     if phase == Phase::Placement {
-        if !is_corner(target_position) {
-            rating += 2;
+        if move_blocks_oponent_mill {
+            rating += 5;
+        }
 
+        if !is_corner(target_position) {
+            rating += 1;
+
+            // if there is one empty field & one occupied with some of the same as current_turn, either on or across rings
             let on_ring_state_next = conf.arr[target_position.0 as usize][((target_position.1 + 1) % 8) as usize];
             let on_ring_state_previous = conf.arr[target_position.0 as usize][((target_position.1 + 7) % 8) as usize];
 
             if (on_ring_state_next == current_turn && on_ring_state_previous == State::Empty)
                 | (on_ring_state_next == State::Empty && on_ring_state_previous == current_turn)
             {
-                rating += 1;
+                rating += 3;
             }
 
             let across_rings_state_next = conf.arr[((target_position.0 + 1) % 3) as usize][target_position.1 as usize];
@@ -345,7 +400,7 @@ fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: 
             if (across_rings_state_next == current_turn && across_rings_state_previous == State::Empty)
                 | (across_rings_state_next == State::Empty && across_rings_state_previous == current_turn)
             {
-                rating += 1;
+                rating += 3;
             }
         } else {
             // check corner placement for possible muehle trap setup
@@ -362,6 +417,35 @@ fn evaluate_move(conf: &mut Configuration, m: Move, phase: Phase, current_turn: 
                     | (previous_on_ring_state == State::Empty && previous_previous_on_ring_state == current_turn))
             {
                 rating += 2;
+            }
+        }
+    } else {
+        //let Vec<Configuration> = compute_moves(&mod_conf, phase, current_turn.flip_color());
+
+        // favor moves that open mills
+        if let Action::Move(start_position, _) = m.action {
+            if is_muhle(conf, start_position) {
+
+                let mut opponent_can_mill = false;
+                let mut opponent_can_block_mill = false;
+
+                for_each_move(&mod_conf, phase, current_turn.flip_color(), |m|{
+                    let opponent_target_pos = if let Action::Move(_, target_position) = m.action {
+                        target_position
+                    } else {
+                        panic!()
+                    };
+
+                    if is_muhle(&mod_conf, opponent_target_pos) {
+                        opponent_can_mill = true;
+                    } else if start_position == opponent_target_pos{
+                        opponent_can_block_mill = true;
+                    }
+                });
+
+                if !opponent_can_mill && !opponent_can_block_mill {
+                    rating += 10;
+                }
             }
         }
     }
@@ -394,7 +478,7 @@ fn simulation(
     expanded_nodes_conf: Configuration,
     expanded_nodes_turn: State,
     expanded_nodes_move_count: u32,
-    conf_buf: &mut Vec<(Configuration, i32)>,
+    conf_buf: &mut Vec<(Configuration, u32)>,
 ) -> Nash {
     let mut current_conf = expanded_nodes_conf;
     let mut current_turn = expanded_nodes_turn;
@@ -403,7 +487,7 @@ fn simulation(
     let mut current_nash = Nash::DRAW;
 
     // TODO break the function when the path is too long and there is a high possibility it is a draw
-    while current_nash == Nash::DRAW {
+    while Phase::from(expanded_nodes_move_count) != Phase::Placement && current_nash == Nash::DRAW {
         current_conf = get_rand_move(&mut current_conf, Phase::from(current_move_count), current_turn, conf_buf);
         conf_buf.clear();
 
@@ -417,7 +501,7 @@ fn simulation(
 }
 
 /// Computes possible moves from config, chooses one randomly, updates config with new one
-fn get_rand_move(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<(Configuration, i32)>) -> Configuration {
+fn get_rand_move(conf: &mut Configuration, phase: Phase, current_turn: State, buff: &mut Vec<(Configuration, u32)>) -> Configuration {
     compute_best_configs(conf, phase, current_turn, buff);
 
     let i = unsafe { RNG.generate_range(0..buff.len())};
