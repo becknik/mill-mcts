@@ -1,14 +1,7 @@
-use std::fs::File;
-
-use nanorand::{Rng, WyRand};
-use once_cell::sync::Lazy;
-
 use crate::{
     ds::{apply_action, Action, Configuration, Move, Phase, Pos, State, POSITIONS},
-    mcts::mcts,
+    mcts::{mcts, MCTSNodeContent, TREE_INIT_NODE_COUNT},
 };
-
-static mut RNG_TEST: Lazy<WyRand> = Lazy::new(|| WyRand::new());
 
 mod ds;
 mod mcts;
@@ -145,45 +138,13 @@ pub fn compute_moves(conf: &Configuration, phase: Phase, color: State) -> Vec<Mo
     res
 }
 
-fn main() {
-/*      let arr = [
-        [
-            State::Empty,
-            State::Black,
-            State::Empty,
-            State::White,
-            State::Empty,
-            State::Empty,
-            State::Empty,
-            State::White,
-        ],
-        [
-            State::Empty,
-            State::Empty,
-            State::Black,
-            State::Empty,
-            State::Empty,
-            State::Black,
-            State::Black,
-            State::Empty,
-        ],
-        [
-            State::White,
-            State::Empty,
-            State::Empty,
-            State::White,
-            State::White,
-            State::Empty,
-            State::Black,
-            State::Empty,
-        ],
-    ];
-
-    mcts(&Configuration { arr }, 10, State::White);
-    return;
- */
+fn main() -> ! {
     let mut total_moves_made = 0;
-    let file = File::open("moves-neccessary_for_win.log");
+
+    // initilize tree for the continuous mcts pass on to avoid multiple calculations on parts of the same subtree
+    let mut tree = id_tree::TreeBuilder::<MCTSNodeContent>::new().with_node_capacity(TREE_INIT_NODE_COUNT).build();
+
+    let mut last_mcts_pick_node_id = Option::None;
 
     loop {
         let mut input = String::new();
@@ -210,16 +171,35 @@ fn main() {
         if total_moves_made == 0 && (count(&conf, State::White) > 0 || count(&conf, State::Black) > 0) {
             total_moves_made += 1;
         }
+        if phase != Phase::from(total_moves_made) {
+            panic!("Programmer dumb lol");
+        }
 
-        let selected = mcts(&conf, total_moves_made, color);
+        let (selected_move, selected_node_id, mod_tree) =
+            mcts(tree, &mut last_mcts_pick_node_id, &conf, total_moves_made, color);
+        tree = mod_tree;
+        last_mcts_pick_node_id = Option::Some(selected_node_id);
 
-        /*         let moves = compute_moves(&conf, phase, color);
-        let selectedd_move = mcts(&conf, total_moves_made, color);
+        println!("{}", selected_move.to_string());
 
-        let i = unsafe { RNG_TEST.generate_range(0..moves.len()) };
-        let selected = moves[i]; */
-        println!("{}", selected.to_string());
+        // Adding all possible opponent moves to the tree, when they aren't already present there
+/*         let last_picked_children: Vec<Configuration> =
+            tree.children(last_mcts_pick_node_id.as_ref().unwrap()).unwrap().map(|n| n.data().clone().conf).collect();
 
+        let last_picked_node = tree.get(last_mcts_pick_node_id.as_ref().unwrap()).unwrap().data().clone();
+        for_each_move(&last_picked_node.conf, Phase::from(total_moves_made + 1), color.flip_color(), |m| {
+            let mod_conf = apply_move(&last_picked_node.conf, &m, color.flip_color());
+
+            if !last_picked_children.contains(&mod_conf) {
+                tree.insert(
+                    Node::new(MCTSNodeContent::new(mod_conf, u32::MAX, 1)),
+                    id_tree::InsertBehavior::UnderNode(last_mcts_pick_node_id.as_ref().unwrap()),
+                )
+                .unwrap();
+            }
+        }); */
+
+        // Finally update the mode count
         total_moves_made += 2;
     }
 }
